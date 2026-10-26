@@ -4,6 +4,7 @@ import torch
 from einops import einsum, rearrange, reduce
 from torch import Tensor, nn
 from torch.nn import functional as F
+from torch.utils.checkpoint import checkpoint
 
 
 @dataclass(frozen=True)
@@ -166,6 +167,7 @@ class CimiModel(nn.Module):
     def __init__(self, config: ModelConfig | None = None):
         super().__init__()
         self.config = config or ModelConfig()
+        self.gradient_checkpointing = False
         config = self.config
         self.embed_tokens = nn.Embedding(config.vocab_size, config.d_model)
         self.rope = RotaryEmbedding(
@@ -194,7 +196,10 @@ class CimiModel(nn.Module):
         cos, sin = self.rope(seq_len)
         aux_loss = x.new_zeros((), dtype=torch.float32)
         for layer in self.layers:
-            x, layer_aux_loss = layer(x, cos, sin)
+            if self.gradient_checkpointing and self.training and torch.is_grad_enabled():
+                x, layer_aux_loss = checkpoint(layer, x, cos, sin, use_reentrant=False)
+            else:
+                x, layer_aux_loss = layer(x, cos, sin)
             aux_loss = aux_loss + layer_aux_loss
         aux_loss = aux_loss / max(1, self.config.num_layers // 2)
         return ModelOutput(logits=self.lm_head(self.norm(x)), aux_loss=aux_loss)
